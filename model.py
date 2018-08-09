@@ -9,7 +9,7 @@ from tensorflow.contrib.crf import crf_log_likelihood, viterbi_decode
 from model_dataset import DatasetMaker
 from eval_utils import entity_metric_collect
 
-__all__ = ["TrainModel", "EvalModel"]
+__all__ = ["TrainModel", "EvalModel", "InferModel"]
 
 
 class BaseModel(object):
@@ -79,18 +79,23 @@ class BaseModel(object):
 
 
 class TrainModel(BaseModel):
-    def __init__(self, iterator, flags):
+    def __init__(self, iterator, flags, global_step):
         chars, tags = iterator.get_next()
         self.tags = tags
         super(TrainModel).__init__(chars, flags, flags.dropout)
         self.lr = flags.lr
         self.clip = flags.clip
+        self.is_sync = flags.is_sync
         self.loss_type = flags.loss_type
+        self.worker_num = flags.worker_num
 
+        self.train_summary = []
         self.logits = self.build_graph()
+        self.trans = None
         self.loss = self._build_loss_layer(self.logits, self.tags)
-        self.train_op = self._optimizer(self.loss)
-        self.saver = tf.train.Saver(tf.global_variables())
+        self.train_op = self._optimizer(self.loss, global_step)
+        self.saver = tf.train.Saver(var_list=tf.global_variables(), sharded=True)
+        self.merge_train_summary_op = tf.summary.merge(self.train_summary)
 
     def _build_loss_layer(self, inputs, tags):
         loss = None
@@ -98,6 +103,7 @@ class TrainModel(BaseModel):
             loss = self._softmax_cross_entropy_loss(inputs, tags)
         elif self.loss_type == "crf":
             loss = self._crf_loss(inputs, tags, self.char_len)
+        self.train_summary.append(tf.summary.scalar("training_loss", loss))
         return loss
 
     @staticmethod
@@ -122,17 +128,21 @@ class TrainModel(BaseModel):
             start_tags = tf.cast(self.tag_num * tf.ones([batch_size, 1]), tf.int32)
             tags = tf.concat([start_tags, real_tags], axis=1)
 
-            trans = tf.get_variable("crf_transitions", shape=[self.tag_num + 1, self.tag_num + 1],
-                                    initializer=self.initializer)
-            log_likelihood, trans = crf_log_likelihood(inputs=logits, tag_indices=tags, sequence_lengths=lengths+1, transition_params=trans)
+            self.trans = tf.get_variable("crf_transitions", shape=[self.tag_num + 1, self.tag_num + 1],
+                                         initializer=self.initializer)
+            log_likelihood, self.trans = crf_log_likelihood(inputs=logits, tag_indices=tags, sequence_lengths=lengths+1,
+                                                            transition_params=self.trans)
             loss = tf.reduce_mean(-log_likelihood)
         return loss
 
-    def _optimizer(self, loss):
+    def _optimizer(self, loss, global_step):
         optimizer = tf.train.AdamOptimizer(self.lr)
+        if self.is_sync:
+            optimizer = tf.train.SyncReplicasOptimizer(optimizer, replicas_to_aggregate=self.worker_num,
+                                                       total_num_replicas=self.worker_num)
         grads_vars = optimizer.compute_gradients(loss)
         capped_grads_vars = [[tf.clip_by_value(g, -self.clip, self.clip), v] for g, v in grads_vars]
-        train_op = optimizer.apply_gradients(capped_grads_vars)
+        train_op = optimizer.apply_gradients(capped_grads_vars, global_step)
         return train_op
 
     def train(self, session):
@@ -140,17 +150,27 @@ class TrainModel(BaseModel):
         return loss_value
 
 
-class EvalMode(BaseModel):
-    def __init__(self, iterator, flags):
+class EvalModel(BaseModel):
+    def __init__(self, iterator, flags, name):
+        flags.dropout = 1.0
+        # super(EvalModel).__init__(iterator, flags, None)
+        self._make_eval_summary()
         chars, tags = iterator.get_next
         self.tags = tags
-        super(EvalMode).__init__(chars, flags, 1.0)
-        self.loss_type = flags.loss_type
+        with tf.name_scope("eval_graph" if not name else name):
+            super(EvalModel).__init__(chars, flags, 1.0)
+            self.loss_type = flags.loss_type
 
-        self.logits = self.build_graph()
-        with tf.variable_scope("crf_loss"):
-            self.trans = tf.get_variable("crf_transitions", shape=[self.tag_num + 1, self.tag_num + 1],
-                                         initializer=self.initializer)
+            self.logits = self.build_graph()
+            with tf.variable_scope("crf_loss"):
+                self.trans = tf.get_variable("crf_transitions", shape=[self.tag_num + 1, self.tag_num + 1],
+                                             initializer=self.initializer)
+
+        train_variable_dict = {}
+        for var in tf.global_variables():
+            name = var.op.name.replace(u"eval_graph/", u"")
+            train_variable_dict[name] = var
+        self.saver = tf.train.Saver(var_list=train_variable_dict, sharded=True)
 
     def _logits_to_tag_ids(self, logits, matrix=None):
         predict_tag_ids = None
@@ -197,6 +217,20 @@ class EvalMode(BaseModel):
         except tf.errors.OutOfRangeError:
             return metric_dict
 
+    def _make_eval_summary(self):
+        self.eval_summary = []
+        self.valid_accuracy = tf.placeholder(tf.float32, shape=None)
+        self.test_accuracy = tf.placeholder(tf.float32, shape=None)
+        with tf.variable_scope("performance"):
+            self.eval_summary.append(tf.summary.scalar("valid_accuracy", self.valid_accuracy))
+            self.eval_summary.append(tf.summary.scalar("test_accuracy", self.test_accuracy))
+        self.merge_eval_summary_op = tf.summary.merge(self.eval_summary)
+
+    def save_dev_test_summary(self, summary_writer, session, dev_accuracy, test_accuracy, step):
+        merged_summary = session.run(self.merge_eval_summary_op, feed_dict={self.valid_accuracy: dev_accuracy,
+                                                                            self.test_accuracy: test_accuracy})
+        summary_writer.add_graph(session.graph)
+        summary_writer.add_summary(merged_summary, step)
 
 
 

@@ -119,17 +119,19 @@ class DatasetMaker(object):
         tf.logging.info("Created mapping table tensor from exist mapping dict!")
 
     @classmethod
-    def make_dataset(cls, file_path, batch_size, task_type):
+    def make_dataset(cls, file_path, batch_size, task_type, num_shards, worker_index):
         if not cls.mapping_tensor_ready:
             tf.logging.error("Error: mapping tensor isn't initialized!")
             sys.exit(0)
 
         if task_type == "infer":
             dataset = tf.data.Dataset.from_generator(_generator_maker(file_path, True), tf.string, None)
+            dataset = dataset.shard(num_shards, worker_index)
             dataset = dataset.map(lambda chars: (cls.char_mapping_tensor.lookup(chars)))
             dataset = dataset.padded_batch(batch_size, padded_shapes=None)
         else:
             dataset = tf.data.Dataset.from_generator(_generator_maker(file_path, False), (tf.string, tf.string), (None, None))
+            dataset = dataset.shard(num_shards, worker_index)
             dataset = dataset.shuffle(buffer_size=1000)
             dataset = dataset.map(lambda chars, tags: (cls.char_mapping_tensor.lookup(chars), cls.tag_mapping_tensor.lookup(tags)))
             # train
