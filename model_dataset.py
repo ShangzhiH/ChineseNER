@@ -65,11 +65,12 @@ class DatasetMaker(object):
     @classmethod
     def generate_mapping(cls, file_path):
         char_freq = {}
-        for char_list, tag_list in _generator_maker(file_path):
+        for char_list, tag_list in _generator_maker(file_path)():
             for char in char_list:
                 char_freq[char] = char_freq.get(char, 0) + 1
             for tag in tag_list:
-                cls.tag_to_id[tag], cls.id_to_tag[len(cls.id_to_tag)] = len(cls.tag_to_id), tag
+                cls.tag_to_id[tag] = cls.tag_to_id.get(tag, len(cls.tag_to_id))
+                cls.id_to_tag[cls.tag_to_id[tag]] = tag
 
         sorted_items = sorted(char_freq.items(), key=lambda d: d[1], reverse=True)
         for key, value in sorted_items:
@@ -106,40 +107,39 @@ class DatasetMaker(object):
             tf.logging.error("Error: mapping dict isn't initialized!")
             sys.exit(0)
 
-        cls.char_mapping_tensor = tf.contrib.lookup.HashTable(
-            tf.contrib.lookup.KeyValueTensorIntializer(cls.char_to_id.keys(), cls.char_to_id.values()),
+        char_mapping_tensor = tf.contrib.lookup.HashTable(
+            tf.contrib.lookup.KeyValueTensorInitializer(cls.char_to_id.keys(), cls.char_to_id.values()),
             cls.char_to_id.get(u"<UNK>")
         )
-        cls.tag_mapping_tensor = tf.contrib.lookup.HashTable(
-            tf.contrib.lookup.KeyValueTensorIntializer(cls.tag_to_id.keys(), cls.tag_to_id.values()),
+        tag_mapping_tensor = tf.contrib.lookup.HashTable(
+            tf.contrib.lookup.KeyValueTensorInitializer(cls.tag_to_id.keys(), cls.tag_to_id.values()),
             cls.tag_to_id.get(u"O")
         )
-
-        cls.mapping_tensor_ready = True
         tf.logging.info("Created mapping table tensor from exist mapping dict!")
+        return char_mapping_tensor, tag_mapping_tensor
 
-    @classmethod
-    def make_dataset(cls, file_path, batch_size, task_type, num_shards, worker_index):
-        if not cls.mapping_tensor_ready:
-            tf.logging.error("Error: mapping tensor isn't initialized!")
-            sys.exit(0)
-
+    @staticmethod
+    def make_dataset(char_mapping_tensor, tag_mapping_tensor, file_path, batch_size, task_type, num_shards, worker_index):
         if task_type == "infer":
-            dataset = tf.data.Dataset.from_generator(_generator_maker(file_path, True), tf.string, None)
+            dataset = tf.data.Dataset.from_generator(_generator_maker(file_path, True), tf.string, tf.TensorShape([None]))
             dataset = dataset.shard(num_shards, worker_index)
-            dataset = dataset.map(lambda chars: (cls.char_mapping_tensor.lookup(chars)))
-            dataset = dataset.padded_batch(batch_size, padded_shapes=None)
+            dataset = dataset.map(lambda chars: (char_mapping_tensor.lookup(chars)))
+            dataset = dataset.padded_batch(batch_size, padded_shapes=tf.TensorShape([None]))
         else:
-            dataset = tf.data.Dataset.from_generator(_generator_maker(file_path, False), (tf.string, tf.string), (None, None))
+            dataset = tf.data.Dataset.from_generator(_generator_maker(file_path, False), (tf.string, tf.string),
+                                                     (tf.TensorShape([None]), tf.TensorShape([None])))
             dataset = dataset.shard(num_shards, worker_index)
             dataset = dataset.shuffle(buffer_size=1000)
-            dataset = dataset.map(lambda chars, tags: (cls.char_mapping_tensor.lookup(chars), cls.tag_mapping_tensor.lookup(tags)))
+            dataset = dataset.map(lambda chars, tags:
+                                  (char_mapping_tensor.lookup(chars), tag_mapping_tensor.lookup(tags)))
             # train
             if task_type == "train":
-                dataset = dataset.padded_batch(batch_size, padded_shapes=(None, None)).repeat()
+                dataset = dataset.padded_batch(batch_size, padded_shapes=(tf.TensorShape([None]),
+                                                                          tf.TensorShape([None]))).repeat()
             # eval
             elif task_type == "eval":
-                dataset = dataset.padded_batch(batch_size, padded_shapes=(None, None))
+                dataset = dataset.padded_batch(batch_size, padded_shapes=(tf.TensorShape([None]),
+                                                                          tf.TensorShape([None])))
         return dataset
 
 

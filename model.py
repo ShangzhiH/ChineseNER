@@ -67,8 +67,8 @@ class BaseModel(object):
     def _build_multilayer_rnn(self, rnn_input, rnn_type, rnn_dim, rnn_layer, lengths):
         inputs = rnn_input
         for i in range(rnn_layer):
-            with tf.variable_scope("Bi{} Sequence: Layer-{}".format(rnn_type, i+1)):
-                inputs = self._build_birnn_layer(input, rnn_type, rnn_dim, lengths)
+            with tf.variable_scope("Bi{}_Sequence_Layer_{}".format(rnn_type, i+1)):
+                inputs = self._build_birnn_layer(inputs, rnn_type, rnn_dim, lengths)
         return inputs
 
     def _build_projection_layer(self, inputs, output_dim):
@@ -82,12 +82,13 @@ class TrainModel(BaseModel):
     def __init__(self, iterator, flags, global_step):
         chars, tags = iterator.get_next()
         self.tags = tags
-        super(TrainModel).__init__(chars, flags, flags.dropout)
+        super(TrainModel, self).__init__(chars, flags, flags.dropout)
         self.lr = flags.lr
         self.clip = flags.clip
         self.is_sync = flags.is_sync
         self.loss_type = flags.loss_type
         self.worker_num = flags.worker_num
+        self.global_step = global_step
 
         self.train_summary = []
         self.logits = self.build_graph()
@@ -120,7 +121,7 @@ class TrainModel(BaseModel):
             small = -1000.0
             # pad start position for crf loss
             start_logits = tf.concat([small * tf.ones(shape=[batch_size, 1, self.tag_num]),
-                                      tf.zeros(shape=tf.zeros(batch_size, 1, 1))], axis=2)
+                                      tf.zeros(shape=[batch_size, 1, 1])], axis=2)
             pad_logits = tf.cast(small * tf.ones([batch_size, num_steps, 1]), tf.float32)
             logits = tf.concat([project_logits, pad_logits], axis=2)
             logits = tf.concat([start_logits, logits], axis=1)
@@ -146,8 +147,8 @@ class TrainModel(BaseModel):
         return train_op
 
     def train(self, session):
-        loss_value, _ = session.run([self.loss, self.train_op])
-        return loss_value
+        step, loss_value, _ = session.run([self.global_step, self.loss, self.train_op])
+        return step, loss_value
 
 
 class EvalModel(BaseModel):
@@ -155,16 +156,16 @@ class EvalModel(BaseModel):
         flags.dropout = 1.0
         # super(EvalModel).__init__(iterator, flags, None)
         self._make_eval_summary()
-        chars, tags = iterator.get_next
+        chars, tags = iterator.get_next()
         self.tags = tags
         with tf.name_scope("eval_graph" if not name else name):
-            super(EvalModel).__init__(chars, flags, 1.0)
+            super(EvalModel, self).__init__(chars, flags, 1.0)
             self.loss_type = flags.loss_type
-
+            if self.loss_type == "crf":
+                with tf.variable_scope("crf_loss"):
+                    self.trans = tf.get_variable("crf_transitions", shape=[self.tag_num + 1, self.tag_num + 1],
+                                                 initializer=self.initializer)
             self.logits = self.build_graph()
-            with tf.variable_scope("crf_loss"):
-                self.trans = tf.get_variable("crf_transitions", shape=[self.tag_num + 1, self.tag_num + 1],
-                                             initializer=self.initializer)
 
         train_variable_dict = {}
         for var in tf.global_variables():
@@ -172,12 +173,12 @@ class EvalModel(BaseModel):
             train_variable_dict[name] = var
         self.saver = tf.train.Saver(var_list=train_variable_dict, sharded=True)
 
-    def _logits_to_tag_ids(self, logits, matrix=None):
+    def _logits_to_tag_ids(self, logits, lengths=None, matrix=None):
         predict_tag_ids = None
         if self.loss_type == "softmax":
             predict_tag_ids = np.argmax(logits, axis=2)
         elif self.loss_type == "crf":
-            predict_tag_ids = self._decode(logits, self.char_len, matrix)
+            predict_tag_ids = self._decode(logits, lengths, matrix)
         return predict_tag_ids
 
     def _decode(self, logits, lengths, matrix):
@@ -207,13 +208,14 @@ class EvalModel(BaseModel):
             while True:
                 predict_tag_ids = None
                 if self.loss_type == "softmax":
-                    logits = session.run(self.logits)
+                    real_tag_ids, logits = session.run([self.tags, self.logits])
                     predict_tag_ids = self._logits_to_tag_ids(logits)
                 elif self.loss_type == "crf":
-                    logits, trans = session.run([self.logits, self.trans])
-                    predict_tag_ids = self._logits_to_tag_ids(logits, trans)
+                    real_tag_ids, logits, lengths, trans = session.run([self.tags, self.logits, self.char_len, self.trans])
+                    predict_tag_ids = self._logits_to_tag_ids(logits, lengths, trans)
                 predict_tags = DatasetMaker.tag_ids_to_tags(predict_tag_ids)
-                metric_dict = entity_metric_collect(self.tags, predict_tags, metric_dict)
+                real_tags = DatasetMaker.tag_ids_to_tags(real_tag_ids)
+                metric_dict = entity_metric_collect(real_tags, predict_tags, metric_dict)
         except tf.errors.OutOfRangeError:
             return metric_dict
 
