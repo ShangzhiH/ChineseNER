@@ -7,19 +7,20 @@ import tensorflow as tf
 __all__ = ['entity_metric_collect']
 
 
-def entity_metric_collect(real_tag_seqs, predict_tag_seqs, metrics):
+def entity_metric_collect(real_tag_seqs, predict_tag_seqs, lengths, metrics):
+    """"""
     try:
-        assert len(real_tag_seqs) == len(predict_tag_seqs)
+        assert len(real_tag_seqs) == len(predict_tag_seqs) == len(lengths)
     except AssertionError:
         tf.logging.error("Error: predict tag seq num doesn't equal real tag seq!")
         sys.exit(0)
 
-    for real_tag_seq, predict_tag_seq in zip(real_tag_seqs, predict_tag_seqs):
-        metrics = _entity_count(real_tag_seq, predict_tag_seq, metrics)
+    for real_tag_seq, predict_tag_seq, length in zip(real_tag_seqs, predict_tag_seqs, lengths):
+        metrics = _entity_count(real_tag_seq, predict_tag_seq, length, metrics)
     return metrics
 
 
-def _entity_count(real_tag_seq, predict_tag_seq, count):
+def _entity_count(real_tag_seq, predict_tag_seq, length, count):
     real_pos, real_type = _extract_entity_pos_and_type(real_tag_seq[0])
     predict_pos, predict_type = _extract_entity_pos_and_type(predict_tag_seq[0])
 
@@ -33,7 +34,7 @@ def _entity_count(real_tag_seq, predict_tag_seq, count):
         last_predict_entity_item_len = 0
         last_predict_entity_type = ""
 
-    for real_tag, predict_tag in zip(real_tag_seq[1:] + ["O"], predict_tag_seq[1:] + ["O"]):
+    for real_tag, predict_tag in zip(real_tag_seq[1:length] + ["O"], predict_tag_seq[1:length] + ["O"]):
         real_pos, real_type = _extract_entity_pos_and_type(real_tag)
         predict_pos, predict_type = _extract_entity_pos_and_type(predict_tag)
 
@@ -92,7 +93,12 @@ def _entity_count(real_tag_seq, predict_tag_seq, count):
 
 def _update_entity_check(cur_pos, cur_type, last_type):
     """
-    check if last entity reaches the end
+    check if previous entity reaches the end
+    when current tag
+    - is O
+    - begins with B
+    - different entity type
+    means previous tag is the end of entity
     """
     if cur_pos == "O":
         return True
@@ -106,7 +112,7 @@ def _update_entity_check(cur_pos, cur_type, last_type):
 
 def _extract_entity_pos_and_type(tag):
     """
-    convert tag to position(B, I, O etc.) with type(ORG, PER, O etc.)
+    split tag in position(B, I, O etc.) and type(ORG, PER, O etc.)
     """
     if tag == "O":
         return "O", "O"
@@ -121,6 +127,15 @@ def _entity_type_exist_check(tag, info):
     if tag not in info:
         info[tag] = {"real": 0, "predict": 0, "correct": 0}
     return info
+
+if __name__ == "__main__":
+    metrics_dict = {"ORG": {'real': 2, 'predict': 2, 'correct': 1}}
+    real_seqs = [["O", "O", "B-ORG", "I-ORG", "O", "B-PER", "I-PER", "B-LOC", "B-LOC"],
+                 ["B-ORG", "B-LOC", "I-LOC", "O", "O", "O", "O", "B-PER"]]
+    predict_seqs = [["B-PER", "O", "B-ORG", "I-PER", "O", "B-PER", "I-PER", "B-LOC", "O"],
+                    ["B-ORG", "B-LOC", "I-LOC", "O", "O", "O", "O", "B-PER"]]
+    print(entity_metric_collect(real_seqs, predict_seqs, metrics_dict))
+
 
 
 

@@ -21,7 +21,7 @@ def _generator_maker(file_path, infer=False):
                 if len(tokens) != 2:
                     continue
                 sentence, tag_seq = tokens
-                chars = sentence.strip().split("/")
+                chars = list(sentence.strip())
                 tags = tag_seq.strip().split("/")
                 try:
                     assert len(chars) == len(tags)

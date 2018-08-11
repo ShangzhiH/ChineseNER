@@ -107,10 +107,12 @@ class TrainModel(BaseModel):
         self.train_summary.append(tf.summary.scalar("training_loss", loss))
         return loss
 
-    @staticmethod
-    def _softmax_cross_entropy_loss(project_logits, tags):
+    def _softmax_cross_entropy_loss(self, project_logits, tags):
         with tf.variable_scope("softmax_cross_entropy_loss"):
-            log_likelihood = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=project_logits, labels=tags)
+            # use weights to mask loss of padding position
+            log_likelihood = tf.losses.sparse_softmax_cross_entropy(
+                logits=project_logits, labels=tags, weights=tf.cast(tf.sequence_mask(self.char_len), tf.float32)
+            )
             loss = tf.reduce_mean(log_likelihood)
         return loss
 
@@ -208,14 +210,14 @@ class EvalModel(BaseModel):
             while True:
                 predict_tag_ids = None
                 if self.loss_type == "softmax":
-                    real_tag_ids, logits = session.run([self.tags, self.logits])
+                    lengths, real_tag_ids, logits = session.run([self.char_len, self.tags, self.logits])
                     predict_tag_ids = self._logits_to_tag_ids(logits)
                 elif self.loss_type == "crf":
                     real_tag_ids, logits, lengths, trans = session.run([self.tags, self.logits, self.char_len, self.trans])
                     predict_tag_ids = self._logits_to_tag_ids(logits, lengths, trans)
                 predict_tags = DatasetMaker.tag_ids_to_tags(predict_tag_ids)
                 real_tags = DatasetMaker.tag_ids_to_tags(real_tag_ids)
-                metric_dict = entity_metric_collect(real_tags, predict_tags, metric_dict)
+                metric_dict = entity_metric_collect(real_tags, predict_tags, lengths, metric_dict)
         except tf.errors.OutOfRangeError:
             return metric_dict
 

@@ -32,12 +32,14 @@ def load_flags(path):
             flags.__dict__['__flags'][k] = v
     return flags
 
+
 def unicode_open(filepath):
     with tf.gfile.GFile(filepath, "r") as f:
         for line in f:
             if type(line) == str:
                 line = line.decode("utf-8")
             yield line
+
 
 def make_path(params):
     """
@@ -132,6 +134,7 @@ def print_config(config, logger):
     """
     for k, v in config.items():
         logger.info("{}:\t{}".format(k.ljust(15), v))
+
 
 def create_model(session, Model_class, path, load_vec, config, id_to_char, logger):
     # create model, reuse parameters if exists

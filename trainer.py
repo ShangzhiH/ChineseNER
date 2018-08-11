@@ -15,21 +15,21 @@ flags.DEFINE_boolean("is_sync", False, "Whether use sync strategy to update para
 flags.DEFINE_float("lr", 0.001, "learning rate")
 flags.DEFINE_float("clip", 5.0, "gradient clipper value")
 flags.DEFINE_float("max_epoch", 1000, "the max number of epochs")
-flags.DEFINE_integer("batch_size", 2, "batch size")
-flags.DEFINE_integer("check_step", 1, "Check loss every N steps")
-flags.DEFINE_integer("eval_step", 2, "Eval model every N steps")
+flags.DEFINE_integer("batch_size", 4, "batch size")
+flags.DEFINE_integer("check_step", 100, "Check loss every N steps")
+flags.DEFINE_integer("eval_step", 500, "Eval model every N steps")
 flags.DEFINE_string("root_path", "", "project root path")
 flags.DEFINE_string("log_dir", "log/", "log directory")
-flags.DEFINE_string("train_data", "data/train_ner", "training data source")
-flags.DEFINE_string("valid_data", "data/valid_ner", "validation data source")
-flags.DEFINE_string("test_data", "data/test_ner", "test data source")
+flags.DEFINE_string("train_data", "data/new_example.train", "training data source")
+flags.DEFINE_string("valid_data", "data/new_example.dev", "validation data source")
+flags.DEFINE_string("test_data", "data/new_example.test", "test data source")
 flags.DEFINE_string("N_best_model", 10, "models of top N accuracy")
 
-flags.DEFINE_integer("char_dim", 300, "char embedding dimension")
+flags.DEFINE_integer("char_dim", 100, "char embedding dimension")
 flags.DEFINE_string("rnn_type", "LSTM", "rnn cell type")
-flags.DEFINE_integer("rnn_dim", 300, "rnn hidden dimension")
+flags.DEFINE_integer("rnn_dim", 100, "rnn hidden dimension")
 flags.DEFINE_integer("rnn_layer", 1, "rnn layer number")
-flags.DEFINE_string("loss_type", "softmax", "type of loss layer")
+flags.DEFINE_string("loss_type", "crf", "type of loss layer")
 flags.DEFINE_float("dropout", 0.5, "dropout rate during training")
 
 FLAGS = flags.FLAGS
@@ -72,13 +72,26 @@ class Trainer(object):
         tf.logging.info("Iterator is switched to {}".format(name))
 
         metric_dict = model.evaluate(session)
+        all_real = sum([v["real"] for v in metric_dict.values()])
+        all_real_entity = sum(v["real"] for k, v in metric_dict.items() if k != "O")
         all_correct = sum([v["correct"] for v in metric_dict.values()])
+        all_correct_entity = sum([v["correct"] for k, v in metric_dict.items() if k != "O"])
         all_predict = sum([v["predict"] for v in metric_dict.values()])
-        accuracy = all_correct / all_predict
-        tf.logging.info("Processed: {} entities; found: {} entities; correct: {}; accuracy {:.2f}%"
-                        .format(all_predict, all_predict, all_correct, 100.0 * accuracy))
+        all_predict_entity = sum([v["predict"] for k, v in metric_dict.items() if k != "O"])
+        accuracy = 1.0 * all_correct / all_predict
+        tf.logging.info("Processed: {} phrases(including {} O tag); found: {}; correct: {}; accuracy {:.2f}%"
+                        .format(all_real, all_real - all_real_entity, all_predict, all_correct, 100.0 * accuracy))
+        tf.logging.info("Processed: {} entities; found: {} entities; correct: {};"
+                        .format(all_real_entity, all_predict_entity, all_correct_entity))
+        all_precision = 0.0 if all_predict_entity == 0 else 100.0 * all_correct_entity / all_predict_entity
+        all_recall = 0.0 if all_real_entity == 0 else 100.0 * all_correct_entity / all_real_entity
+        all_f1 = 0.0 if all_precision + all_recall == 0.0 else 2.0 * all_precision * all_recall / (all_precision + all_recall)
+        tf.logging.info(" ------------------------- precision: {:.2f}%; recall: {:.2f}%; f1: {:.2f}%"
+                        .format(all_precision, all_recall, all_f1))
 
         for key, value in sorted(metric_dict.items(), key=lambda d: d[0]):
+            if key == "O":
+                continue
             precision = 0.0 if value["predict"] == 0 else 100.0 * value["correct"] / value["predict"]
             recall = 0.0 if value["real"] == 0 else 100.0 * value["correct"] / value["real"]
             f1 = 0.0 if precision + recall == 0 else 2.0 * precision * recall / (precision + recall)
@@ -87,16 +100,19 @@ class Trainer(object):
             tf.logging.info(" ------------------------- precision: {:.2f}%; recall: {:.2f}%; f1: {:.2f}%"
                             .format(precision, recall, f1))
         if name == "validation":
-            if accuracy > self.model_performance[self.worst_valid_model_index]:
-                tf.logging.info("New best validation accuracy:{:.2f}".format(100.0 * accuracy))
-                self.model_performance[self.worst_valid_model_index] = accuracy
+            if all_f1 > self.model_performance[self.worst_valid_model_index]:
+                tf.logging.info("New best validation entity f1:{:.2f}%".format(all_f1))
+                self.model_performance[self.worst_valid_model_index] = all_f1
                 model.saver.save(session, os.path.join(self.log_dir, "ner_model.ckpt"), self.worst_valid_model_index)
                 model.saver.save(session, os.path.join(self.log_dir, "best_ner_model.ckpt"))
-                self.worst_valid_model_index = sorted(self.model_performance.items(), key=lambda d: d[0])[0][0]
+                tf.logging.info("Replacing model in {} by current model".format(
+                    os.path.join(self.log_dir, "ner_model.ckpt-") + str(self.worst_valid_model_index)))
+                tf.logging.info("Saving best model in {}".format(os.path.join(self.log_dir, "best_ner_model.ckpt")))
+                self.worst_valid_model_index = sorted(self.model_performance.items(), key=lambda d: d[1])[0][0]
         elif name == "test":
-            if accuracy > self.best_test_accuracy:
-                tf.logging.info("New best test accuracy:{:.2f}".format(100.0 * accuracy))
-        return accuracy
+            if all_f1 > self.best_test_accuracy:
+                tf.logging.info("New best test entity f1:{:.2f}".format(all_f1))
+        return all_f1
 
     def _init_dataset_maker(self, load=False):
         if not load:
